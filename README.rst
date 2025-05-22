@@ -40,5 +40,15 @@ A ``Sequence`` is a collection of ordered fields, and differs from ``Array`` and
     >>> format = Sequence(PascalString(Byte, "utf8"), GreedyRange(Byte))
     >>> format.build([u"lalaland", [255,1,2]])
     b'\nlalaland\xff\x01\x02'
-    >>> format.parse(b"\x004361789432197")
-    ['', [52, 51, 54, 49, 55, 56, 57, 52, 51, 50, 49, 57, 55]]
+  >>> format.parse(b"\x004361789432197")
+  ['', [52, 51, 54, 49, 55, 56, 57, 52, 51, 50, 49, 57, 55]]
+
+Optional Rust Backend
+---------------------
+
+Construct ships with an experimental Rust implementation for selected
+functionality. By default the pure Python implementation is used. Set the
+environment variable ``CONSTRUCT_USE_RUST`` to enable the Rust version::
+
+    $ export CONSTRUCT_USE_RUST=1
+    >>> import construct

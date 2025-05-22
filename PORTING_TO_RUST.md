@@ -36,3 +36,6 @@ To keep the scope manageable, the following areas could be ported first:
 
 By re‑implementing these parts in Rust while preserving the Python API, we can begin improving performance without rewriting the entire library at once.
 
+The Rust backend is optional and can be enabled by setting the environment
+variable ``CONSTRUCT_USE_RUST`` before importing ``construct``.
+

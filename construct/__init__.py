@@ -19,11 +19,13 @@ Hands-on example:
     b"\x01\x02\x03"
 """
 
+import os
 from construct.core import *
-try:
-    from construct_rs import Construct as Construct
-except Exception:
-    pass
+if os.getenv("CONSTRUCT_USE_RUST"):
+    try:
+        from construct_rs import Construct as Construct
+    except Exception:
+        pass
 from construct.expr import *
 from construct.debug import *
 from construct.version import *
