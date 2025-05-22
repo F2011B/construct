@@ -11,3 +11,5 @@ build/
 .cache
 .tox
 .pytest_cache
+construct-rs/target/
+construct-rs/Cargo.lock
