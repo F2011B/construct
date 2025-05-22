@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write, Seek, SeekFrom};
+use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 /// Error types mirroring `construct.core` exceptions.
 #[derive(Debug)]
@@ -100,6 +102,46 @@ pub fn hyphenatedict(input: &HashMap<String, String>) -> HashMap<String, String>
 /// Apply [`hyphenatedict`] to all dictionaries in the slice.
 pub fn hyphenatelist(list: &[HashMap<String, String>]) -> Vec<HashMap<String, String>> {
     list.iter().map(hyphenatedict).collect()
+}
+
+// ========================= Python bindings ==============================
+
+#[pyclass]
+pub struct Construct {}
+
+#[pymethods]
+impl Construct {
+    #[new]
+    fn new() -> Self {
+        Construct {}
+    }
+
+    /// Parse bytes from memory. Currently returns the data unchanged.
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<&'py PyBytes> {
+        Ok(PyBytes::new(py, data.as_bytes()))
+    }
+
+    /// Build an object into bytes. Returns the input bytes.
+    fn build<'py>(&self, py: Python<'py>, obj: &PyBytes) -> PyResult<&'py PyBytes> {
+        Ok(PyBytes::new(py, obj.as_bytes()))
+    }
+
+    /// Parse entire contents of a file.
+    fn parse_file<'py>(&self, py: Python<'py>, filename: &str) -> PyResult<&'py PyBytes> {
+        let data = std::fs::read(filename).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        Ok(PyBytes::new(py, &data))
+    }
+
+    /// Build bytes into a file.
+    fn build_file(&self, filename: &str, data: &PyBytes) -> PyResult<()> {
+        std::fs::write(filename, data.as_bytes()).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+    }
+}
+
+#[pymodule]
+fn construct_rs(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<Construct>()?;
+    Ok(())
 }
 
 #[cfg(test)]

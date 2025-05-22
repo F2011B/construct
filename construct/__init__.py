@@ -20,6 +20,10 @@ Hands-on example:
 """
 
 from construct.core import *
+try:
+    from construct_rs import Construct as Construct
+except Exception:
+    pass
 from construct.expr import *
 from construct.debug import *
 from construct.version import *
