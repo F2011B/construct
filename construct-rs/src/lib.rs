@@ -106,7 +106,7 @@ pub fn hyphenatelist(list: &[HashMap<String, String>]) -> Vec<HashMap<String, St
 
 // ========================= Python bindings ==============================
 
-#[pyclass]
+#[pyclass(subclass)]
 pub struct Construct {}
 
 #[pymethods]
@@ -138,9 +138,48 @@ impl Construct {
     }
 }
 
+/// A wrapper around another `Construct`-like object.
+#[pyclass(extends=Construct)]
+pub struct Subconstruct {
+    subcon: Py<PyAny>,
+}
+
+#[pymethods]
+impl Subconstruct {
+    #[new]
+    fn new(subcon: Py<PyAny>) -> (Self, Construct) {
+        (Subconstruct { subcon }, Construct {})
+    }
+
+    /// Delegate parsing to the wrapped construct.
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<&'py PyBytes> {
+        let res = self.subcon.as_ref(py).call_method1("parse", (data,))?;
+        res.extract()
+    }
+
+    /// Delegate building to the wrapped construct.
+    fn build<'py>(&self, py: Python<'py>, obj: &PyBytes) -> PyResult<&'py PyBytes> {
+        let res = self.subcon.as_ref(py).call_method1("build", (obj,))?;
+        res.extract()
+    }
+
+    /// Delegate file parsing to the wrapped construct.
+    fn parse_file<'py>(&self, py: Python<'py>, filename: &str) -> PyResult<&'py PyBytes> {
+        let res = self.subcon.as_ref(py).call_method1("parse_file", (filename,))?;
+        res.extract()
+    }
+
+    /// Delegate file building to the wrapped construct.
+    fn build_file(&self, py: Python, filename: &str, data: &PyBytes) -> PyResult<()> {
+        self.subcon.as_ref(py).call_method1("build_file", (filename, data))?;
+        Ok(())
+    }
+}
+
 #[pymodule]
 fn construct_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Construct>()?;
+    m.add_class::<Subconstruct>()?;
     Ok(())
 }
 
@@ -148,6 +187,8 @@ fn construct_rs(_py: Python, m: &PyModule) -> PyResult<()> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use pyo3::Python;
+    use pyo3::types::PyBytes;
 
     #[test]
     fn test_stream_helpers() {
@@ -163,5 +204,18 @@ mod tests {
         let mut cur = Cursor::new(data);
         let buf = stream_read_entire(&mut cur).unwrap();
         assert_eq!(buf, b"abcdef");
+    }
+
+    #[test]
+    fn test_subconstruct_delegation() {
+        Python::with_gil(|py| {
+            let inner = Py::new(py, Construct {}).unwrap();
+            let sub = Py::new(py, (Subconstruct { subcon: inner.clone_ref(py) }, Construct {})).unwrap();
+            let data = PyBytes::new(py, b"abc");
+            let res: &PyBytes = sub.call_method1(py, "parse", (data,)).unwrap().extract(py).unwrap();
+            assert_eq!(res.as_bytes(), b"abc");
+            let built: &PyBytes = sub.call_method1(py, "build", (data,)).unwrap().extract(py).unwrap();
+            assert_eq!(built.as_bytes(), b"abc");
+        });
     }
 }
