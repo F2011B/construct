@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write, Seek, SeekFrom};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyString, PyDict};
 
 /// Error types mirroring `construct.core` exceptions.
 #[derive(Debug)]
@@ -102,6 +102,38 @@ pub fn hyphenatedict(input: &HashMap<String, String>) -> HashMap<String, String>
 /// Apply [`hyphenatedict`] to all dictionaries in the slice.
 pub fn hyphenatelist(list: &[HashMap<String, String>]) -> Vec<HashMap<String, String>> {
     list.iter().map(hyphenatedict).collect()
+}
+
+// ========================= String helpers ============================
+
+/// Mapping of supported encodings to their unit size in bytes.
+fn encoding_unit(enc: &str) -> Result<&'static [u8], ConstructError> {
+    match enc.replace('-', "_").to_lowercase().as_str() {
+        "ascii" | "utf8" | "utf_8" | "u8" => Ok(b"\x00"),
+        "utf16" | "utf_16" | "u16" | "utf_16_be" | "utf_16_le" => Ok(b"\x00\x00"),
+        "utf32" | "utf_32" | "u32" | "utf_32_be" | "utf_32_le" => Ok(b"\x00\x00\x00\x00"),
+        _ => Err(ConstructError::StringError),
+    }
+}
+
+/// Exposed dictionary of supported encodings used by string constructs.
+fn build_possiblestringencodings(py: Python) -> PyObject {
+    let dict = PyDict::new(py);
+    dict.set_item("ascii", 1).unwrap();
+    dict.set_item("utf8", 1).unwrap();
+    dict.set_item("utf_8", 1).unwrap();
+    dict.set_item("u8", 1).unwrap();
+    dict.set_item("utf16", 2).unwrap();
+    dict.set_item("utf_16", 2).unwrap();
+    dict.set_item("u16", 2).unwrap();
+    dict.set_item("utf_16_be", 2).unwrap();
+    dict.set_item("utf_16_le", 2).unwrap();
+    dict.set_item("utf32", 4).unwrap();
+    dict.set_item("utf_32", 4).unwrap();
+    dict.set_item("u32", 4).unwrap();
+    dict.set_item("utf_32_be", 4).unwrap();
+    dict.set_item("utf_32_le", 4).unwrap();
+    dict.into()
 }
 
 // ========================= BitsInteger ================================
@@ -586,10 +618,246 @@ impl Subconstruct {
     }
 }
 
+// ========================= Adapter ==================================
+
+/// Base class for value transforming constructs.
+#[pyclass(extends=Subconstruct)]
+pub struct Adapter {}
+
+#[pymethods]
+impl Adapter {
+    #[new]
+    fn new(subcon: Py<PyAny>) -> (Self, Subconstruct) {
+        (Adapter {}, Subconstruct { subcon })
+    }
+
+    /// Parse and then decode using `_decode` implemented by subclasses.
+    fn parse<'py>(slf: PyRef<'py, Self>, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        let base: PyRef<Subconstruct> = slf.into_super();
+        let intermediate = base.subcon.as_ref(py).call_method1("parse", (data,))?;
+        slf.as_ref().call_method1(py, "_decode", (intermediate,))
+    }
+
+    /// Encode with `_encode` implemented by subclasses and build using the wrapped construct.
+    fn build<'py>(slf: PyRef<'py, Self>, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let encoded = slf.as_ref().call_method1(py, "_encode", (obj,))?;
+        let base: PyRef<Subconstruct> = slf.into_super();
+        let res = base.subcon.as_ref(py).call_method1("build", (encoded,))?;
+        res.extract()
+    }
+
+    #[pyo3(name = "_decode")]
+    fn _decode(&self, _py: Python, _obj: &PyAny) -> PyResult<PyObject> {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>("_decode not implemented"))
+    }
+
+    #[pyo3(name = "_encode")]
+    fn _encode(&self, _py: Python, _obj: &PyAny) -> PyResult<PyObject> {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>("_encode not implemented"))
+    }
+}
+
+// ========================= StringEncoded =============================
+
+/// Adapter that applies encoding/decoding on byte strings.
+#[pyclass(extends=Adapter)]
+pub struct StringEncoded {
+    encoding: String,
+}
+
+#[pymethods]
+impl StringEncoded {
+    #[new]
+    fn new(subcon: Py<PyAny>, encoding: &str) -> PyResult<(Self, Adapter, Subconstruct)> {
+        encoding_unit(encoding)?;
+        Ok((StringEncoded { encoding: encoding.to_string() }, Adapter {}, Subconstruct { subcon }))
+    }
+
+    #[pyo3(name = "_decode")]
+    fn _decode<'py>(&self, py: Python<'py>, obj: &PyBytes) -> PyResult<PyObject> {
+        obj.call_method1(py, "decode", (self.encoding.as_str(),))
+    }
+
+    #[pyo3(name = "_encode")]
+    fn _encode<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<PyObject> {
+        let s: &str = obj.extract()?;
+        let py_str = PyString::new(py, s);
+        let data: &PyBytes = py_str.call_method1("encode", (self.encoding.as_str(),))?.extract()?;
+        Ok(data.into())
+    }
+}
+
+// ========================= String Classes ============================
+
+#[pyclass(extends=Construct)]
+pub struct PaddedString {
+    length: usize,
+    encoding: String,
+}
+
+#[pymethods]
+impl PaddedString {
+    #[new]
+    fn new(length: usize, encoding: &str) -> PyResult<(Self, Construct)> {
+        encoding_unit(encoding)?;
+        Ok((PaddedString { length, encoding: encoding.to_string() }, Construct {}))
+    }
+
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        if data.len() != self.length {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("input length mismatch"));
+        }
+        let mut buf = data.as_bytes().to_vec();
+        let pad = encoding_unit(&self.encoding).unwrap();
+        while buf.ends_with(pad) && !buf.is_empty() {
+            let l = pad.len();
+            buf.truncate(buf.len() - l);
+        }
+        PyBytes::new(py, &buf).call_method1("decode", (self.encoding.as_str(),))
+    }
+
+    fn build<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let s: &str = obj.extract()?;
+        let py_str = PyString::new(py, s);
+        let mut data: Vec<u8> = py_str
+            .call_method1("encode", (self.encoding.as_str(),))?
+            .extract::<&PyBytes>()?
+            .as_bytes()
+            .to_vec();
+        if data.len() > self.length {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("string too long"));
+        }
+        let pad = encoding_unit(&self.encoding).unwrap();
+        while data.len() < self.length {
+            data.extend_from_slice(pad);
+        }
+        Ok(PyBytes::new(py, &data))
+    }
+
+    fn sizeof(&self) -> PyResult<usize> {
+        Ok(self.length)
+    }
+}
+
+#[pyclass(extends=Construct)]
+pub struct PascalString {
+    lengthfield: Py<PyAny>,
+    encoding: String,
+}
+
+#[pymethods]
+impl PascalString {
+    #[new]
+    fn new(lengthfield: Py<PyAny>, encoding: &str) -> PyResult<(Self, Construct)> {
+        encoding_unit(encoding)?;
+        Ok((PascalString { lengthfield, encoding: encoding.to_string() }, Construct {}))
+    }
+
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        let len_size: usize = self.lengthfield.as_ref(py).call_method0("sizeof")?.extract()?;
+        if data.len() < len_size {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("input length mismatch"));
+        }
+        let len_bytes = PyBytes::new(py, &data.as_bytes()[..len_size]);
+        let length: usize = self.lengthfield.as_ref(py).call_method1("parse", (len_bytes,))?.extract()?;
+        let end = len_size + length;
+        if data.len() != end {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("input length mismatch"));
+        }
+        let content = PyBytes::new(py, &data.as_bytes()[len_size..end]);
+        content.call_method1("decode", (self.encoding.as_str(),))
+    }
+
+    fn build<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let s: &str = obj.extract()?;
+        let py_str = PyString::new(py, s);
+        let data_bytes: &PyBytes = py_str.call_method1("encode", (self.encoding.as_str(),))?.extract()?;
+        let length = data_bytes.len();
+        let len_field: &PyBytes = self.lengthfield.as_ref(py).call_method1("build", (length,))?.extract()?;
+        let mut out = len_field.as_bytes().to_vec();
+        out.extend_from_slice(data_bytes.as_bytes());
+        Ok(PyBytes::new(py, &out))
+    }
+
+    fn sizeof(&self) -> PyResult<usize> {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("size is dynamic"))
+    }
+}
+
+#[pyclass(extends=Construct)]
+pub struct CString {
+    encoding: String,
+}
+
+#[pymethods]
+impl CString {
+    #[new]
+    fn new(encoding: &str) -> PyResult<(Self, Construct)> {
+        encoding_unit(encoding)?;
+        Ok((CString { encoding: encoding.to_string() }, Construct {}))
+    }
+
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        let pad = encoding_unit(&self.encoding).unwrap();
+        if !data.as_bytes().ends_with(pad) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("missing terminator"));
+        }
+        let slice = &data.as_bytes()[..data.len() - pad.len()];
+        PyBytes::new(py, slice).call_method1("decode", (self.encoding.as_str(),))
+    }
+
+    fn build<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let s: &str = obj.extract()?;
+        let py_str = PyString::new(py, s);
+        let mut data: Vec<u8> = py_str.call_method1("encode", (self.encoding.as_str(),))?.extract::<&PyBytes>()?.as_bytes().to_vec();
+        let pad = encoding_unit(&self.encoding).unwrap();
+        data.extend_from_slice(pad);
+        Ok(PyBytes::new(py, &data))
+    }
+
+    fn sizeof(&self) -> PyResult<usize> {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("size is dynamic"))
+    }
+}
+
+#[pyclass(extends=Construct)]
+pub struct GreedyString {
+    encoding: String,
+}
+
+#[pymethods]
+impl GreedyString {
+    #[new]
+    fn new(encoding: &str) -> PyResult<(Self, Construct)> {
+        encoding_unit(encoding)?;
+        Ok((GreedyString { encoding: encoding.to_string() }, Construct {}))
+    }
+
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        data.call_method1(py, "decode", (self.encoding.as_str(),))
+    }
+
+    fn build<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let s: &str = obj.extract()?;
+        let py_str = PyString::new(py, s);
+        py_str.call_method1("encode", (self.encoding.as_str(),))?.extract()
+    }
+
+    fn sizeof(&self) -> PyResult<usize> {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("size is dynamic"))
+    }
+}
+
 #[pymodule]
 fn construct_rs(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Construct>()?;
     m.add_class::<Subconstruct>()?;
+    m.add_class::<Adapter>()?;
+    m.add_class::<StringEncoded>()?;
+    m.add_class::<PaddedString>()?;
+    m.add_class::<PascalString>()?;
+    m.add_class::<CString>()?;
+    m.add_class::<GreedyString>()?;
     m.add_class::<BitsInteger>()?;
     m.add_class::<BytesInteger>()?;
     m.add_class::<FormatField>()?;
@@ -648,6 +916,9 @@ fn construct_rs(py: Python, m: &PyModule) -> PyResult<()> {
     m.add("Int24sb", Py::new(py, (BytesInteger { length: 3, signed: true, swapped: false }, Construct {}))?)?;
     m.add("Int24sl", Py::new(py, (BytesInteger { length: 3, signed: true, swapped: true }, Construct {}))?)?;
     m.add("Int24sn", Py::new(py, (BytesInteger { length: 3, signed: true, swapped: native_le }, Construct {}))?)?;
+
+    let poss = build_possiblestringencodings(py);
+    m.add("possiblestringencodings", poss)?;
 
     Ok(())
 }
