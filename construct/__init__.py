@@ -23,7 +23,7 @@ import os
 from construct.core import *
 if os.getenv("CONSTRUCT_USE_RUST"):
     try:
-        from construct_rs import Construct as Construct
+        from construct_rs import Construct as Construct, BitsInteger as BitsInteger
     except Exception:
         pass
 from construct.expr import *

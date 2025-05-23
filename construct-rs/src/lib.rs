@@ -43,6 +43,12 @@ impl std::fmt::Display for ConstructError {
 
 impl std::error::Error for ConstructError {}
 
+fn construct_error(py: Python<'_>, name: &str, msg: &str) -> PyErr {
+    let module = py.import("construct.core").expect("construct.core must be importable");
+    let exc = module.getattr(name).expect("exception not found");
+    PyErr::from_type(exc, msg.to_string())
+}
+
 /// Read exactly `length` bytes from a stream.
 pub fn stream_read(stream: &mut impl Read, length: usize) -> Result<Vec<u8>, ConstructError> {
     let mut buf = vec![0u8; length];
@@ -104,6 +110,14 @@ pub fn hyphenatelist(list: &[HashMap<String, String>]) -> Vec<HashMap<String, St
     list.iter().map(hyphenatedict).collect()
 }
 
+// ========================= Integer helpers ==============================
+
+pub fn swapbytes(data: &[u8]) -> Vec<u8> {
+    let mut out = data.to_vec();
+    out.reverse();
+    out
+}
+
 // ========================= Python bindings ==============================
 
 #[pyclass]
@@ -138,9 +152,78 @@ impl Construct {
     }
 }
 
+#[pyclass]
+pub struct BitsInteger {
+    length: Option<usize>,
+    signed: bool,
+    swapped: bool,
+}
+
+#[pymethods]
+impl BitsInteger {
+    #[new]
+    #[pyo3(signature=(length, signed=false, swapped=false))]
+    fn new(length: &PyAny, signed: bool, swapped: bool) -> Self {
+        let len = length.extract::<usize>().ok();
+        BitsInteger { length: len, signed, swapped }
+    }
+
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        let length = match self.length {
+            Some(l) => l,
+            None => return Err(construct_error(py, "SizeofError", "cannot calculate size, key not found in context")),
+        };
+        let mut bits = data.as_bytes();
+        if bits.len() != length {
+            return Err(construct_error(py, "StreamError", "stream read less than specified amount"));
+        }
+        let mut vec = bits.to_vec();
+        if self.swapped {
+            if length % 8 != 0 {
+                return Err(construct_error(py, "IntegerError", "little-endianness is only defined for multiples of 8 bits"));
+            }
+            vec = swapbytes(&vec);
+        }
+        let module = py.import("construct.lib.binary")?;
+        let func = module.getattr("bits2integer")?;
+        let obj = func.call1((PyBytes::new(py, &vec), self.signed))?;
+        Ok(obj.into())
+    }
+
+    fn build<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let length = match self.length {
+            Some(l) => l,
+            None => return Err(construct_error(py, "SizeofError", "cannot calculate size, key not found in context")),
+        };
+        let text = obj.str()?.to_str()?;
+        if text.starts_with('-') && !self.signed {
+            return Err(construct_error(py, "IntegerError", "value is negative, but field is not signed"));
+        }
+        let module = py.import("construct.lib.binary")?;
+        let func = module.getattr("integer2bits")?;
+        let bits_py = func.call1((obj, length))?;
+        let mut bits: Vec<u8> = bits_py.extract()?;
+        if self.swapped {
+            if length % 8 != 0 {
+                return Err(construct_error(py, "IntegerError", "little-endianness is only defined for multiples of 8 bits"));
+            }
+            bits = swapbytes(&bits);
+        }
+        Ok(PyBytes::new(py, &bits))
+    }
+
+    fn sizeof(&self, py: Python) -> PyResult<usize> {
+        match self.length {
+            Some(l) => Ok(l),
+            None => Err(construct_error(py, "SizeofError", "cannot calculate size, key not found in context")),
+        }
+    }
+}
+
 #[pymodule]
 fn construct_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Construct>()?;
+    m.add_class::<BitsInteger>()?;
     Ok(())
 }
 
