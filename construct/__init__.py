@@ -28,6 +28,13 @@ if os.getenv("CONSTRUCT_USE_RUST"):
         from construct_rs import BitsInteger as BitsInteger
         from construct_rs import BytesInteger as BytesInteger
         from construct_rs import FormatField as FormatField
+        from construct_rs import Adapter as Adapter
+        from construct_rs import StringEncoded as StringEncoded
+        from construct_rs import PaddedString as PaddedString
+        from construct_rs import PascalString as PascalString
+        from construct_rs import CString as CString
+        from construct_rs import GreedyString as GreedyString
+        from construct_rs import possiblestringencodings as possiblestringencodings
         from construct_rs import Bit as Bit
         from construct_rs import Nibble as Nibble
         from construct_rs import Octet as Octet
