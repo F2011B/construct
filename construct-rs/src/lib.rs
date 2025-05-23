@@ -104,6 +104,112 @@ pub fn hyphenatelist(list: &[HashMap<String, String>]) -> Vec<HashMap<String, St
     list.iter().map(hyphenatedict).collect()
 }
 
+// ========================= BitsInteger ================================
+
+#[pyclass(extends=Construct)]
+pub struct BitsInteger {
+    length: usize,
+    signed: bool,
+    swapped: bool,
+}
+
+#[pymethods]
+impl BitsInteger {
+    #[new]
+    fn new(length: usize, signed: Option<bool>, swapped: Option<bool>) -> (Self, Construct) {
+        (
+            BitsInteger {
+                length,
+                signed: signed.unwrap_or(false),
+                swapped: swapped.unwrap_or(false),
+            },
+            Construct {},
+        )
+    }
+
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        let mut bits = data.as_bytes().to_vec();
+        if bits.len() != self.length {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "input length mismatch",
+            ));
+        }
+        if self.swapped {
+            if self.length % 8 != 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "little-endianness is only defined for multiples of 8 bits",
+                ));
+            }
+            bits.reverse();
+        }
+        let val = bits2integer(&bits, self.signed);
+        Ok(val.into_py(py))
+    }
+
+    fn build<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let mut val: i128 = obj.extract()?;
+        if val < 0 && !self.signed {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "value is negative, but field is not signed",
+            ));
+        }
+        let mut bits = integer2bits(val, self.length)
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("integer error"))?;
+        if self.swapped {
+            if self.length % 8 != 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "little-endianness is only defined for multiples of 8 bits",
+                ));
+            }
+            bits.reverse();
+        }
+        Ok(PyBytes::new(py, &bits))
+    }
+
+    fn sizeof(&self) -> PyResult<usize> {
+        Ok(self.length)
+    }
+}
+
+/// Convert an integer into a bit string using big-endian bit order.
+pub fn integer2bits(mut number: i128, width: usize) -> Result<Vec<u8>, ConstructError> {
+    if width > 128 {
+        return Err(ConstructError::IntegerError);
+    }
+    if width == 0 {
+        return Ok(Vec::new());
+    }
+    if number < 0 {
+        number += 1i128.checked_shl(width as u32).ok_or(ConstructError::IntegerError)?;
+    }
+    let mut bits = vec![0u8; width];
+    for i in (0..width).rev() {
+        bits[i] = (number & 1) as u8;
+        number >>= 1;
+    }
+    Ok(bits)
+}
+
+/// Convert a big-endian bit string into an integer.
+pub fn bits2integer(data: &[u8], signed: bool) -> i128 {
+    let mut number: i128 = 0;
+    for &b in data {
+        number = (number << 1) | if b != 0 { 1 } else { 0 };
+    }
+    if signed && !data.is_empty() && data[0] != 0 {
+        let bias = 1i128 << data.len();
+        number - bias
+    } else {
+        number
+    }
+}
+
+/// Reverse byte order of a bit string.
+pub fn swapbytes(mut data: Vec<u8>) -> Vec<u8> {
+    data.reverse();
+    data
+}
+
 // ========================= Python bindings ==============================
 
 #[pyclass(subclass)]
@@ -180,6 +286,7 @@ impl Subconstruct {
 fn construct_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Construct>()?;
     m.add_class::<Subconstruct>()?;
+    m.add_class::<BitsInteger>()?;
     Ok(())
 }
 
@@ -216,6 +323,19 @@ mod tests {
             assert_eq!(res.as_bytes(), b"abc");
             let built: &PyBytes = sub.call_method1(py, "build", (data,)).unwrap().extract(py).unwrap();
             assert_eq!(built.as_bytes(), b"abc");
+        });
+    }
+
+    #[test]
+    fn test_bitsinteger() {
+        Python::with_gil(|py| {
+            let obj = Py::new(py, (BitsInteger { length: 8, signed: false, swapped: false }, Construct {})).unwrap();
+            let data = PyBytes::new(py, &[1u8; 8]);
+            let val: i128 = obj.call_method1(py, "parse", (data,)).unwrap().extract(py).unwrap();
+            assert_eq!(val, 255);
+
+            let built: &PyBytes = obj.call_method1(py, "build", (255i128,)).unwrap().extract(py).unwrap();
+            assert_eq!(built.as_bytes(), &[1u8; 8]);
         });
     }
 }
