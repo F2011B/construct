@@ -25,6 +25,24 @@ if os.getenv("CONSTRUCT_USE_RUST"):
     try:
         from construct_rs import Construct as Construct
         from construct_rs import Subconstruct as Subconstruct
+        from construct_rs import BitsInteger as BitsInteger
+        from construct_rs import BytesInteger as BytesInteger
+        from construct_rs import FormatField as FormatField
+        from construct_rs import Bit as Bit
+        from construct_rs import Nibble as Nibble
+        from construct_rs import Octet as Octet
+        from construct_rs import Int8ub, Int16ub, Int32ub, Int64ub
+        from construct_rs import Int8sb, Int16sb, Int32sb, Int64sb
+        from construct_rs import Int8ul, Int16ul, Int32ul, Int64ul
+        from construct_rs import Int8sl, Int16sl, Int32sl, Int64sl
+        from construct_rs import Int8un, Int16un, Int32un, Int64un
+        from construct_rs import Int8sn, Int16sn, Int32sn, Int64sn
+        from construct_rs import Byte, Short, Int, Long
+        from construct_rs import Float32b, Float32l, Float32n
+        from construct_rs import Float64b, Float64l, Float64n
+        from construct_rs import Single, Double
+        from construct_rs import Int24ub, Int24ul, Int24un
+        from construct_rs import Int24sb, Int24sl, Int24sn
     except Exception:
         pass
 from construct.expr import *

@@ -204,10 +204,314 @@ pub fn bits2integer(data: &[u8], signed: bool) -> i128 {
     }
 }
 
+/// Convert an integer into a big-endian byte string.
+pub fn integer2bytes(mut number: i128, width: usize) -> Result<Vec<u8>, ConstructError> {
+    if width > 16 {
+        return Err(ConstructError::IntegerError);
+    }
+    if number < 0 {
+        number += 1i128.checked_shl((width * 8) as u32).ok_or(ConstructError::IntegerError)?;
+    }
+    let mut acc = vec![0u8; width];
+    for i in (0..width).rev() {
+        acc[i] = (number & 0xff) as u8;
+        number >>= 8;
+    }
+    Ok(acc)
+}
+
+/// Convert a big-endian byte string into an integer.
+pub fn bytes2integer(data: &[u8], signed: bool) -> i128 {
+    let mut number: i128 = 0;
+    for &b in data {
+        number = (number << 8) | (b as i128);
+    }
+    if signed && !data.is_empty() && data[0] & 0x80 != 0 {
+        let bias = 1i128 << (data.len() * 8);
+        number - bias
+    } else {
+        number
+    }
+}
+
 /// Reverse byte order of a bit string.
 pub fn swapbytes(mut data: Vec<u8>) -> Vec<u8> {
     data.reverse();
     data
+}
+
+// ========================= BytesInteger ================================
+
+#[pyclass(extends=Construct)]
+pub struct BytesInteger {
+    length: usize,
+    signed: bool,
+    swapped: bool,
+}
+
+#[pymethods]
+impl BytesInteger {
+    #[new]
+    fn new(length: usize, signed: Option<bool>, swapped: Option<bool>) -> (Self, Construct) {
+        (
+            BytesInteger {
+                length,
+                signed: signed.unwrap_or(false),
+                swapped: swapped.unwrap_or(false),
+            },
+            Construct {},
+        )
+    }
+
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        let mut bytes = data.as_bytes().to_vec();
+        if bytes.len() != self.length {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("input length mismatch"));
+        }
+        if self.swapped {
+            bytes.reverse();
+        }
+        let val = bytes2integer(&bytes, self.signed);
+        Ok(val.into_py(py))
+    }
+
+    fn build<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let mut val: i128 = obj.extract()?;
+        if val < 0 && !self.signed {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "value is negative, but field is not signed",
+            ));
+        }
+        let mut data = integer2bytes(val, self.length)
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("integer error"))?;
+        if self.swapped {
+            data.reverse();
+        }
+        Ok(PyBytes::new(py, &data))
+    }
+
+    fn sizeof(&self) -> PyResult<usize> {
+        Ok(self.length)
+    }
+}
+
+// ========================= FormatField ================================
+
+#[pyclass(extends=Construct)]
+pub struct FormatField {
+    endian: char,
+    format: char,
+    length: usize,
+}
+
+#[pymethods]
+impl FormatField {
+    #[new]
+    fn new(endian: &str, format: &str) -> PyResult<(Self, Construct)> {
+        let e = endian.chars().next().unwrap_or('>');
+        let f = format.chars().next().unwrap_or('B');
+        let length = match f {
+            'b' | 'B' => 1,
+            'h' | 'H' => 2,
+            'l' | 'L' | 'f' => 4,
+            'q' | 'Q' | 'd' => 8,
+            _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("bad format")),
+        };
+        Ok((FormatField { endian: e, format: f, length }, Construct {}))
+    }
+
+    fn parse<'py>(&self, py: Python<'py>, data: &PyBytes) -> PyResult<PyObject> {
+        let buf = data.as_bytes();
+        if buf.len() != self.length {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("input length mismatch"));
+        }
+        let val = match self.format {
+            'B' => buf[0] as i128,
+            'b' => (buf[0] as i8) as i128,
+            'H' => {
+                let mut arr = [0u8; 2];
+                arr.copy_from_slice(buf);
+                let v = match self.endian {
+                    '>' => u16::from_be_bytes(arr),
+                    '<' => u16::from_le_bytes(arr),
+                    '=' => u16::from_ne_bytes(arr),
+                    _ => u16::from_be_bytes(arr),
+                };
+                v as i128
+            }
+            'h' => {
+                let mut arr = [0u8; 2];
+                arr.copy_from_slice(buf);
+                let v = match self.endian {
+                    '>' => i16::from_be_bytes(arr),
+                    '<' => i16::from_le_bytes(arr),
+                    '=' => i16::from_ne_bytes(arr),
+                    _ => i16::from_be_bytes(arr),
+                };
+                v as i128
+            }
+            'L' | 'l' => {
+                let mut arr = [0u8; 4];
+                arr.copy_from_slice(buf);
+                if self.format == 'L' {
+                    let v = match self.endian {
+                        '>' => u32::from_be_bytes(arr),
+                        '<' => u32::from_le_bytes(arr),
+                        '=' => u32::from_ne_bytes(arr),
+                        _ => u32::from_be_bytes(arr),
+                    };
+                    v as i128
+                } else {
+                    let v = match self.endian {
+                        '>' => i32::from_be_bytes(arr),
+                        '<' => i32::from_le_bytes(arr),
+                        '=' => i32::from_ne_bytes(arr),
+                        _ => i32::from_be_bytes(arr),
+                    };
+                    v as i128
+                }
+            }
+            'Q' | 'q' => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(buf);
+                if self.format == 'Q' {
+                    let v = match self.endian {
+                        '>' => u64::from_be_bytes(arr),
+                        '<' => u64::from_le_bytes(arr),
+                        '=' => u64::from_ne_bytes(arr),
+                        _ => u64::from_be_bytes(arr),
+                    };
+                    v as i128
+                } else {
+                    let v = match self.endian {
+                        '>' => i64::from_be_bytes(arr),
+                        '<' => i64::from_le_bytes(arr),
+                        '=' => i64::from_ne_bytes(arr),
+                        _ => i64::from_be_bytes(arr),
+                    };
+                    v as i128
+                }
+            }
+            'f' => {
+                let mut arr = [0u8; 4];
+                arr.copy_from_slice(buf);
+                let v = match self.endian {
+                    '>' => f32::from_be_bytes(arr),
+                    '<' => f32::from_le_bytes(arr),
+                    '=' => f32::from_ne_bytes(arr),
+                    _ => f32::from_be_bytes(arr),
+                };
+                return Ok((v as f64).into_py(py));
+            }
+            'd' => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(buf);
+                let v = match self.endian {
+                    '>' => f64::from_be_bytes(arr),
+                    '<' => f64::from_le_bytes(arr),
+                    '=' => f64::from_ne_bytes(arr),
+                    _ => f64::from_be_bytes(arr),
+                };
+                return Ok(v.into_py(py));
+            }
+            _ => 0,
+        };
+        Ok(val.into_py(py))
+    }
+
+    fn build<'py>(&self, py: Python<'py>, obj: &PyAny) -> PyResult<&'py PyBytes> {
+        let bytes = match self.format {
+            'B' => {
+                let v: u8 = obj.extract()?;
+                vec![v]
+            }
+            'b' => {
+                let v: i8 = obj.extract()?;
+                vec![v as u8]
+            }
+            'H' => {
+                let v: u16 = obj.extract()?;
+                match self.endian {
+                    '>' => v.to_be_bytes().to_vec(),
+                    '<' => v.to_le_bytes().to_vec(),
+                    '=' => v.to_ne_bytes().to_vec(),
+                    _ => v.to_be_bytes().to_vec(),
+                }
+            }
+            'h' => {
+                let v: i16 = obj.extract()?;
+                match self.endian {
+                    '>' => v.to_be_bytes().to_vec(),
+                    '<' => v.to_le_bytes().to_vec(),
+                    '=' => v.to_ne_bytes().to_vec(),
+                    _ => v.to_be_bytes().to_vec(),
+                }
+            }
+            'L' | 'l' => {
+                if self.format == 'L' {
+                    let v: u32 = obj.extract()?;
+                    match self.endian {
+                        '>' => v.to_be_bytes().to_vec(),
+                        '<' => v.to_le_bytes().to_vec(),
+                        '=' => v.to_ne_bytes().to_vec(),
+                        _ => v.to_be_bytes().to_vec(),
+                    }
+                } else {
+                    let v: i32 = obj.extract()?;
+                    match self.endian {
+                        '>' => v.to_be_bytes().to_vec(),
+                        '<' => v.to_le_bytes().to_vec(),
+                        '=' => v.to_ne_bytes().to_vec(),
+                        _ => v.to_be_bytes().to_vec(),
+                    }
+                }
+            }
+            'Q' | 'q' => {
+                if self.format == 'Q' {
+                    let v: u64 = obj.extract()?;
+                    match self.endian {
+                        '>' => v.to_be_bytes().to_vec(),
+                        '<' => v.to_le_bytes().to_vec(),
+                        '=' => v.to_ne_bytes().to_vec(),
+                        _ => v.to_be_bytes().to_vec(),
+                    }
+                } else {
+                    let v: i64 = obj.extract()?;
+                    match self.endian {
+                        '>' => v.to_be_bytes().to_vec(),
+                        '<' => v.to_le_bytes().to_vec(),
+                        '=' => v.to_ne_bytes().to_vec(),
+                        _ => v.to_be_bytes().to_vec(),
+                    }
+                }
+            }
+            'f' => {
+                let v: f64 = obj.extract()?;
+                let v = v as f32;
+                match self.endian {
+                    '>' => v.to_be_bytes().to_vec(),
+                    '<' => v.to_le_bytes().to_vec(),
+                    '=' => v.to_ne_bytes().to_vec(),
+                    _ => v.to_be_bytes().to_vec(),
+                }
+            }
+            'd' => {
+                let v: f64 = obj.extract()?;
+                match self.endian {
+                    '>' => v.to_be_bytes().to_vec(),
+                    '<' => v.to_le_bytes().to_vec(),
+                    '=' => v.to_ne_bytes().to_vec(),
+                    _ => v.to_be_bytes().to_vec(),
+                }
+            }
+            _ => Vec::new(),
+        };
+        Ok(PyBytes::new(py, &bytes))
+    }
+
+    fn sizeof(&self) -> PyResult<usize> {
+        Ok(self.length)
+    }
 }
 
 // ========================= Python bindings ==============================
@@ -283,10 +587,68 @@ impl Subconstruct {
 }
 
 #[pymodule]
-fn construct_rs(_py: Python, m: &PyModule) -> PyResult<()> {
+fn construct_rs(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Construct>()?;
     m.add_class::<Subconstruct>()?;
     m.add_class::<BitsInteger>()?;
+    m.add_class::<BytesInteger>()?;
+    m.add_class::<FormatField>()?;
+
+    let bit = Py::new(py, (BitsInteger { length: 1, signed: false, swapped: false }, Construct {}))?;
+    m.add("Bit", bit)?;
+    let nibble = Py::new(py, (BitsInteger { length: 4, signed: false, swapped: false }, Construct {}))?;
+    m.add("Nibble", nibble)?;
+    let octet = Py::new(py, (BitsInteger { length: 8, signed: false, swapped: false }, Construct {}))?;
+    m.add("Octet", octet)?;
+
+    m.add("Int8ub", Py::new(py, (FormatField { endian: '>', format: 'B', length: 1 }, Construct {}))?)?;
+    m.add("Int16ub", Py::new(py, (FormatField { endian: '>', format: 'H', length: 2 }, Construct {}))?)?;
+    m.add("Int32ub", Py::new(py, (FormatField { endian: '>', format: 'L', length: 4 }, Construct {}))?)?;
+    m.add("Int64ub", Py::new(py, (FormatField { endian: '>', format: 'Q', length: 8 }, Construct {}))?)?;
+    m.add("Int8sb", Py::new(py, (FormatField { endian: '>', format: 'b', length: 1 }, Construct {}))?)?;
+    m.add("Int16sb", Py::new(py, (FormatField { endian: '>', format: 'h', length: 2 }, Construct {}))?)?;
+    m.add("Int32sb", Py::new(py, (FormatField { endian: '>', format: 'l', length: 4 }, Construct {}))?)?;
+    m.add("Int64sb", Py::new(py, (FormatField { endian: '>', format: 'q', length: 8 }, Construct {}))?)?;
+    m.add("Int8ul", Py::new(py, (FormatField { endian: '<', format: 'B', length: 1 }, Construct {}))?)?;
+    m.add("Int16ul", Py::new(py, (FormatField { endian: '<', format: 'H', length: 2 }, Construct {}))?)?;
+    m.add("Int32ul", Py::new(py, (FormatField { endian: '<', format: 'L', length: 4 }, Construct {}))?)?;
+    m.add("Int64ul", Py::new(py, (FormatField { endian: '<', format: 'Q', length: 8 }, Construct {}))?)?;
+    m.add("Int8sl", Py::new(py, (FormatField { endian: '<', format: 'b', length: 1 }, Construct {}))?)?;
+    m.add("Int16sl", Py::new(py, (FormatField { endian: '<', format: 'h', length: 2 }, Construct {}))?)?;
+    m.add("Int32sl", Py::new(py, (FormatField { endian: '<', format: 'l', length: 4 }, Construct {}))?)?;
+    m.add("Int64sl", Py::new(py, (FormatField { endian: '<', format: 'q', length: 8 }, Construct {}))?)?;
+    m.add("Int8un", Py::new(py, (FormatField { endian: '=', format: 'B', length: 1 }, Construct {}))?)?;
+    m.add("Int16un", Py::new(py, (FormatField { endian: '=', format: 'H', length: 2 }, Construct {}))?)?;
+    m.add("Int32un", Py::new(py, (FormatField { endian: '=', format: 'L', length: 4 }, Construct {}))?)?;
+    m.add("Int64un", Py::new(py, (FormatField { endian: '=', format: 'Q', length: 8 }, Construct {}))?)?;
+    m.add("Int8sn", Py::new(py, (FormatField { endian: '=', format: 'b', length: 1 }, Construct {}))?)?;
+    m.add("Int16sn", Py::new(py, (FormatField { endian: '=', format: 'h', length: 2 }, Construct {}))?)?;
+    m.add("Int32sn", Py::new(py, (FormatField { endian: '=', format: 'l', length: 4 }, Construct {}))?)?;
+    m.add("Int64sn", Py::new(py, (FormatField { endian: '=', format: 'q', length: 8 }, Construct {}))?)?;
+
+    m.add("Byte", m.getattr("Int8ub")?)?;
+    m.add("Short", m.getattr("Int16ub")?)?;
+    m.add("Int", m.getattr("Int32ub")?)?;
+    m.add("Long", m.getattr("Int64ub")?)?;
+
+    m.add("Float32b", Py::new(py, (FormatField { endian: '>', format: 'f', length: 4 }, Construct {}))?)?;
+    m.add("Float32l", Py::new(py, (FormatField { endian: '<', format: 'f', length: 4 }, Construct {}))?)?;
+    m.add("Float32n", Py::new(py, (FormatField { endian: '=', format: 'f', length: 4 }, Construct {}))?)?;
+    m.add("Float64b", Py::new(py, (FormatField { endian: '>', format: 'd', length: 8 }, Construct {}))?)?;
+    m.add("Float64l", Py::new(py, (FormatField { endian: '<', format: 'd', length: 8 }, Construct {}))?)?;
+    m.add("Float64n", Py::new(py, (FormatField { endian: '=', format: 'd', length: 8 }, Construct {}))?)?;
+
+    m.add("Single", m.getattr("Float32b")?)?;
+    m.add("Double", m.getattr("Float64b")?)?;
+
+    let native_le = cfg!(target_endian = "little");
+    m.add("Int24ub", Py::new(py, (BytesInteger { length: 3, signed: false, swapped: false }, Construct {}))?)?;
+    m.add("Int24ul", Py::new(py, (BytesInteger { length: 3, signed: false, swapped: true }, Construct {}))?)?;
+    m.add("Int24un", Py::new(py, (BytesInteger { length: 3, signed: false, swapped: native_le }, Construct {}))?)?;
+    m.add("Int24sb", Py::new(py, (BytesInteger { length: 3, signed: true, swapped: false }, Construct {}))?)?;
+    m.add("Int24sl", Py::new(py, (BytesInteger { length: 3, signed: true, swapped: true }, Construct {}))?)?;
+    m.add("Int24sn", Py::new(py, (BytesInteger { length: 3, signed: true, swapped: native_le }, Construct {}))?)?;
+
     Ok(())
 }
 
@@ -295,7 +657,8 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use pyo3::Python;
-    use pyo3::types::PyBytes;
+    use pyo3::types::{PyBytes, PyModule};
+    use pyo3::PyAny;
 
     #[test]
     fn test_stream_helpers() {
@@ -336,6 +699,49 @@ mod tests {
 
             let built: &PyBytes = obj.call_method1(py, "build", (255i128,)).unwrap().extract(py).unwrap();
             assert_eq!(built.as_bytes(), &[1u8; 8]);
+        });
+    }
+
+    #[test]
+    fn test_singleton_bits() {
+        Python::with_gil(|py| {
+            let m = PyModule::new(py, "test").unwrap();
+            construct_rs(py, m).unwrap();
+            let bit: &PyAny = m.getattr("Bit").unwrap();
+            let data = PyBytes::new(py, &[1u8]);
+            let val: i128 = bit.call_method1("parse", (data,)).unwrap().extract().unwrap();
+            assert_eq!(val, 1);
+
+            let built: &PyBytes = bit.call_method1("build", (1i128,)).unwrap().extract().unwrap();
+            assert_eq!(built.as_bytes(), &[1u8]);
+        });
+    }
+
+    #[test]
+    fn test_singleton_ints() {
+        Python::with_gil(|py| {
+            let m = PyModule::new(py, "test").unwrap();
+            construct_rs(py, m).unwrap();
+            let int16: &PyAny = m.getattr("Int16ub").unwrap();
+            let data = PyBytes::new(py, &[0x01, 0x02]);
+            let val: i128 = int16.call_method1("parse", (data,)).unwrap().extract().unwrap();
+            assert_eq!(val, 0x0102);
+            let built: &PyBytes = int16.call_method1("build", (0x0102i128,)).unwrap().extract().unwrap();
+            assert_eq!(built.as_bytes(), &[0x01, 0x02]);
+        });
+    }
+
+    #[test]
+    fn test_singleton_bytesinteger() {
+        Python::with_gil(|py| {
+            let m = PyModule::new(py, "test").unwrap();
+            construct_rs(py, m).unwrap();
+            let int24: &PyAny = m.getattr("Int24ub").unwrap();
+            let data = PyBytes::new(py, &[0x01, 0x02, 0x03]);
+            let val: i128 = int24.call_method1("parse", (data,)).unwrap().extract().unwrap();
+            assert_eq!(val, 0x010203);
+            let built: &PyBytes = int24.call_method1("build", (0x010203i128,)).unwrap().extract().unwrap();
+            assert_eq!(built.as_bytes(), &[0x01, 0x02, 0x03]);
         });
     }
 }
